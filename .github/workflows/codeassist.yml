@@ -82,7 +82,7 @@ with open(path, "r", encoding="utf-8", errors="ignore") as fh:
 lines=[]
 for b in cc_visit(code):
     if getattr(b, "complexity", 0) >= 8:
-        lines.append(f"{path}:{getattr(b, "lineno", 1)} CC={b.complexity} {getattr(b, "name", "<block>")}")
+        lines.append(f"{path}:{getattr(b, 'lineno', 1)} CC={b.complexity} {getattr(b, 'name', '<block>')}")
 print("\n".join(lines))
 PY
 )
