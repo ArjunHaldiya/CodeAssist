@@ -1,4 +1,4 @@
-﻿name: CodeAssist Review
+name: CodeAssist Review
 
 on:
   pull_request:
@@ -11,6 +11,7 @@ permissions:
 jobs:
   review:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout (full history for diff)
         uses: actions/checkout@v4
@@ -71,7 +72,7 @@ PY
               REPORT="$REPORT\n\n**bandit**\n\`\`\`\nNo issues.\n\`\`\`"
             fi
 
-            # radon
+            # radon (complexity CC ≥ 8)
             RMSG=$(python - "$f" <<'PY'
 import sys
 from radon.complexity import cc_visit
@@ -81,7 +82,7 @@ with open(path, "r", encoding="utf-8", errors="ignore") as fh:
 lines=[]
 for b in cc_visit(code):
     if getattr(b, "complexity", 0) >= 8:
-        lines.append(f"{path}:{getattr(b, 'lineno', 1)} CC={b.complexity} {getattr(b, 'name', '<block>')}")
+        lines.append(f"{path}:{getattr(b, "lineno", 1)} CC={b.complexity} {getattr(b, "name", "<block>")}")
 print("\n".join(lines))
 PY
 )
