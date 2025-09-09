@@ -4,7 +4,6 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
 
-# Needed so the workflow can post a PR comment
 permissions:
   contents: read
   pull-requests: write
@@ -12,20 +11,11 @@ permissions:
 jobs:
   review:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout full history
+      - name: Checkout (full history for diff)
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # ensure we can diff against base
-
-      - name: Show PR context (debug)
-        run: |
-          echo "BASE REF:      ${{ github.event.pull_request.base.ref }}"
-          echo "BASE SHA:      ${{ github.event.pull_request.base.sha }}"
-          echo "HEAD SHA:      ${{ github.sha }}"
-          git --version
-          python3 --version
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -44,18 +34,12 @@ jobs:
         run: |
           BASE_SHA="${{ github.event.pull_request.base.sha }}"
           HEAD_SHA="${{ github.sha }}"
-          # Show diff just for debug
-          git diff --name-only "$BASE_SHA" "$HEAD_SHA" || true
           CHANGED=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" | grep -E '\.py$' || true)
-          echo "Changed Python files:"
-          echo "$CHANGED"
-          # write to output
-          CHANGED_ESCAPED="${CHANGED//$'\n'/,}"
-          echo "files=$CHANGED_ESCAPED" >> "$GITHUB_OUTPUT"
+          echo "files=$(echo "$CHANGED" | tr '\n' ',' | sed 's/,$//')" >> "$GITHUB_OUTPUT"
 
-      - name: Analyze changed files
-        id: analyze
+      - name: Analyze files
         if: steps.changes.outputs.files != ''
+        id: analyze
         shell: bash
         run: |
           REPORT="### CodeAssist Review"
@@ -78,7 +62,7 @@ jobs:
 import json, sys
 data=json.loads(sys.stdin.read() or "{}")
 for r in data.get("results", []):
-    print(f'{r.get("filename")}:{r.get("line_number")} {r.get("test_id")} {r.get("issue_text")}')
+    print(f"{r.get('filename')}:{r.get('line_number')} {r.get('test_id')} {r.get('issue_text')}")
 PY
 )
             if [ -n "$BMSG" ]; then
@@ -87,18 +71,17 @@ PY
               REPORT="$REPORT\n\n**bandit**\n\`\`\`\nNo issues.\n\`\`\`"
             fi
 
-            # radon (complexity threshold CC>=8)
+            # radon
             RMSG=$(python - "$f" <<'PY'
 import sys
 from radon.complexity import cc_visit
 path = sys.argv[1]
-with open(path, 'r', encoding='utf-8', errors='ignore') as fh:
+with open(path, "r", encoding="utf-8", errors="ignore") as fh:
     code = fh.read()
-blocks = cc_visit(code)
 lines=[]
-for b in blocks:
+for b in cc_visit(code):
     if getattr(b, "complexity", 0) >= 8:
-        lines.append(f"{path}:{getattr(b, 'lineno', 1)} CC={b.complexity} {getattr(b, 'name','<block>')}")
+        lines.append(f"{path}:{getattr(b, 'lineno', 1)} CC={b.complexity} {getattr(b, 'name', '<block>')}")
 print("\n".join(lines))
 PY
 )
@@ -109,26 +92,25 @@ PY
             fi
           done
 
-          # escape for output
           REPORT_ESCAPED="${REPORT//'%'/'%25'}"
           REPORT_ESCAPED="${REPORT_ESCAPED//$'\n'/'%0A'}"
           REPORT_ESCAPED="${REPORT_ESCAPED//$'\r'/'%0D'}"
           echo "report=$REPORT_ESCAPED" >> "$GITHUB_OUTPUT"
 
-      - name: Nothing to analyze
-        if: steps.changes.outputs.files == ''
-        run: echo "No Python changes found in this PR."
-
       - name: Post PR comment
-        if: always()
+        if: steps.changes.outputs.files != ''
         uses: actions/github-script@v7
         with:
           script: |
-            const body = `${{ steps.analyze.outputs.report || 'No Python changes found in this PR.' }}`
-            if (!context.payload.pull_request) return
+            const body = `${{ steps.analyze.outputs.report }}` || "No Python changes found."
+            if (!context.payload.pull_request) return;
             await github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
               body
             })
+
+      - name: No Python changes
+        if: steps.changes.outputs.files == ''
+        run: echo "No Python changes found in this PR."
