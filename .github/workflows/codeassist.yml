@@ -27,79 +27,93 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install "flake8==7.1.1" "pycodestyle==2.12.1" "pyflakes==3.2.0" "mccabe==0.7.0"
-          pip install bandit radon unidiff
+          pip install bandit radon
 
-      - name: Determine changed Python files
+      # Get the list of changed files safely (no fragile bash/quotes)
+      - name: Get changed files
         id: changes
-        shell: bash
-        run: |
-          BASE_SHA="${{ github.event.pull_request.base.sha }}"
-          HEAD_SHA="${{ github.sha }}"
-          CHANGED=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" | grep -E '\.py$' || true)
-          echo "files=$(echo "$CHANGED" | tr '\n' ',' | sed 's/,$//')" >> "$GITHUB_OUTPUT"
+        uses: tj-actions/changed-files@v45
+        with:
+          json: true
+          files: |
+            **/*.py
 
-      - name: Analyze files
-        if: steps.changes.outputs.files != ''
+      - name: Analyze Python changes
         id: analyze
-        shell: bash
+        if: steps.changes.outputs.any_changed == 'true'
+        env:
+          FILES_JSON: ${{ steps.changes.outputs.all_changed_files_json }}
         run: |
-          REPORT="### CodeAssist Review"
-          IFS=',' read -ra FILES <<< "${{ steps.changes.outputs.files }}"
-          for f in "${FILES[@]}"; do
-            [ -f "$f" ] || continue
-            REPORT="$REPORT\n\n**$f**"
+          python - <<'PY'
+          import json, os, subprocess, shlex, sys, textwrap
 
-            # flake8
-            F8=$(flake8 --format="%(path)s:%(row)d:%(col)d %(code)s %(text)s" "$f" || true)
-            if [ -n "$F8" ]; then
-              REPORT="$REPORT\n\n**flake8**\n\`\`\`\n$F8\n\`\`\`"
-            else
-              REPORT="$REPORT\n\n**flake8**\n\`\`\`\nNo issues.\n\`\`\`"
-            fi
+          files = json.loads(os.environ.get("FILES_JSON","[]"))
+          files = [f for f in files if f.endswith(".py")]
 
-            # bandit
-            BJSON=$(bandit -q -f json "$f" || true)
-            BMSG=$(python - <<'PY' <<< "$BJSON"
-import json, sys
-data=json.loads(sys.stdin.read() or "{}")
-for r in data.get("results", []):
-    print(f"{r.get('filename')}:{r.get('line_number')} {r.get('test_id')} {r.get('issue_text')}")
-PY
-)
-            if [ -n "$BMSG" ]; then
-              REPORT="$REPORT\n\n**bandit**\n\`\`\`\n$BMSG\n\`\`\`"
-            else
-              REPORT="$REPORT\n\n**bandit**\n\`\`\`\nNo issues.\n\`\`\`"
-            fi
+          report = ["### CodeAssist Review"]
+          if not files:
+              report.append("No Python changes found in this PR.")
+          else:
+              for f in files:
+                  if not os.path.isfile(f):
+                      continue
+                  report.append(f"\n**{f}**")
 
-            # radon (complexity CC ≥ 8)
-            RMSG=$(python - "$f" <<'PY'
-import sys
-from radon.complexity import cc_visit
-path = sys.argv[1]
-with open(path, "r", encoding="utf-8", errors="ignore") as fh:
-    code = fh.read()
-lines=[]
-for b in cc_visit(code):
-    if getattr(b, "complexity", 0) >= 8:
-        lines.append(f"{path}:{getattr(b, 'lineno', 1)} CC={b.complexity} {getattr(b, 'name', '<block>')}")
-print("\n".join(lines))
-PY
-)
-            if [ -n "$RMSG" ]; then
-              REPORT="$REPORT\n\n**radon (CC ≥ 8)**\n\`\`\`\n$RMSG\n\`\`\`"
-            else
-              REPORT="$REPORT\n\n**radon (CC ≥ 8)**\n\`\`\`\nNo functions over threshold.\n\`\`\`"
-            fi
-          done
+                  # --- flake8 ---
+                  try:
+                      cmd = f'flake8 --format="%(path)s:%(row)d:%(col)d %(code)s %(text)s" {shlex.quote(f)}'
+                      out = subprocess.run(cmd, shell=True, capture_output=True, text=True).stdout.strip()
+                      report.append("\n**flake8**\n```\n" + (out or "No issues.") + "\n```")
+                  except Exception as e:
+                      report.append(f"\n**flake8**\n```\nerror: {e}\n```")
 
-          REPORT_ESCAPED="${REPORT//'%'/'%25'}"
-          REPORT_ESCAPED="${REPORT_ESCAPED//$'\n'/'%0A'}"
-          REPORT_ESCAPED="${REPORT_ESCAPED//$'\r'/'%0D'}"
-          echo "report=$REPORT_ESCAPED" >> "$GITHUB_OUTPUT"
+                  # --- bandit ---
+                  try:
+                      cmd = f'bandit -q -f json {shlex.quote(f)}'
+                      res = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+                      msgs = []
+                      if res.stdout.strip():
+                          data = json.loads(res.stdout)
+                          for r in data.get("results", []):
+                              msgs.append(f"{r.get('filename')}:{r.get('line_number')} {r.get('test_id')} {r.get('issue_text')}")
+                      report.append("\n**bandit**\n```\n" + ("\n".join(msgs) or "No issues.") + "\n```")
+                  except Exception as e:
+                      report.append(f"\n**bandit**\n```\nerror: {e}\n```")
+
+                  # --- radon (CC ≥ 8) ---
+                  try:
+                      from radon.complexity import cc_visit
+                      with open(f, "r", encoding="utf-8", errors="ignore") as fh:
+                          code = fh.read()
+                      lines=[]
+                      for b in cc_visit(code):
+                          cc = getattr(b, "complexity", 0)
+                          if cc >= 8:
+                              name = getattr(b, "name", "<block>")
+                              lineno = getattr(b, "lineno", 1)
+                              lines.append(f"{f}:{lineno} CC={cc} {name}")
+                      report.append("\n**radon (CC ≥ 8)**\n```\n" + ("\n".join(lines) or "No functions over threshold.") + "\n```")
+                  except Exception as e:
+                      report.append(f"\n**radon**\n```\nerror: {e}\n```")
+
+          final = "\n".join(report)
+
+          # Write a multiline output safely for GitHub
+          print(final)
+          with open("report.md", "w", encoding="utf-8") as fh:
+              fh.write(final)
+          print("report<<EOF")
+          print(final)
+          print("EOF")
+          PY
+          {
+            echo "report<<EOF"
+            cat report.md
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Post PR comment
-        if: steps.changes.outputs.files != ''
+        if: steps.changes.outputs.any_changed == 'true'
         uses: actions/github-script@v7
         with:
           script: |
@@ -113,5 +127,5 @@ PY
             })
 
       - name: No Python changes
-        if: steps.changes.outputs.files == ''
+        if: steps.changes.outputs.any_changed != 'true'
         run: echo "No Python changes found in this PR."
