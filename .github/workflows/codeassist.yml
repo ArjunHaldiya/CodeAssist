@@ -1,62 +1,40 @@
-name: CodeAssist Review
-
-on:
-  pull_request:
-    types: [opened, synchronize, reopened]
-
-permissions:
-  contents: read
-  pull-requests: write
-
-jobs:
-  review:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout (full history for diff)
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install "flake8==7.1.1" "pycodestyle==2.12.1" "pyflakes==3.2.0" "mccabe==0.7.0"
-          pip install bandit radon
-
-      # Get the list of changed files safely (no fragile bash/quotes)
-      - name: Get changed files
-        id: changes
-        uses: tj-actions/changed-files@v45
-        with:
-          json: true
-          files: |
-            **/*.py
-
       - name: Analyze Python changes
         id: analyze
         if: steps.changes.outputs.any_changed == 'true'
         env:
           FILES_JSON: ${{ steps.changes.outputs.all_changed_files_json }}
+          FILES_TXT:  ${{ steps.changes.outputs.all_changed_files }}
         run: |
-          python - <<'PY'
-          import json, os, subprocess, shlex, sys, textwrap
+          echo "DEBUG all_changed_files_json:"
+          echo "${FILES_JSON}"
+          echo "DEBUG all_changed_files (newline list):"
+          echo "${FILES_TXT}"
 
-          files = json.loads(os.environ.get("FILES_JSON","[]"))
-          files = [f for f in files if f.endswith(".py")]
+          python - <<'PY'
+          import json, os, subprocess, shlex, sys
+
+          files_json = os.environ.get("FILES_JSON", "")
+          files_txt  = os.environ.get("FILES_TXT", "")
+
+          # Robust parse: prefer JSON; if empty/invalid, fall back to newline text
+          files = []
+          if files_json and files_json.strip():
+              try:
+                  files = json.loads(files_json)
+              except Exception:
+                  pass
+          if not files:
+              files = [f.strip() for f in files_txt.splitlines() if f.strip()]
+
+          # Keep only .py files and that exist
+          import os as _os
+          files = [f for f in files if f.endswith(".py") and _os.path.isfile(f)]
 
           report = ["### CodeAssist Review"]
           if not files:
               report.append("No Python changes found in this PR.")
           else:
               for f in files:
-                  if not os.path.isfile(f):
-                      continue
                   report.append(f"\n**{f}**")
 
                   # --- flake8 ---
@@ -97,8 +75,7 @@ jobs:
                       report.append(f"\n**radon**\n```\nerror: {e}\n```")
 
           final = "\n".join(report)
-
-          # Write a multiline output safely for GitHub
+          # Emit to step output
           print(final)
           with open("report.md", "w", encoding="utf-8") as fh:
               fh.write(final)
@@ -106,26 +83,9 @@ jobs:
           print(final)
           print("EOF")
           PY
+
           {
             echo "report<<EOF"
             cat report.md
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
-
-      - name: Post PR comment
-        if: steps.changes.outputs.any_changed == 'true'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const body = `${{ steps.analyze.outputs.report }}` || "No Python changes found."
-            if (!context.payload.pull_request) return;
-            await github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body
-            })
-
-      - name: No Python changes
-        if: steps.changes.outputs.any_changed != 'true'
-        run: echo "No Python changes found in this PR."
